@@ -8,8 +8,34 @@ from typing import Dict, List, Optional, Tuple
 from rank_bm25 import BM25Okapi
 
 
+# Query expansion synonyms for better recall
+QUERY_EXPANSIONS = {
+    "minimum spend": ["minimum purchase", "minimum transaction", "minimum amount", "minimum charge"],
+    "merchant": ["seller", "vendor", "store", "business"],
+    "refund": ["money back", "return payment", "reversal"],
+    "not working": ["broken", "failing", "error", "down", "issue", "problem"],
+    "delete": ["remove", "cancel", "close"],
+    "blocked": ["frozen", "locked", "disabled"],
+    "lost access": ["cannot login", "locked out", "removed", "no access"],
+    "submission": ["submit", "code submission", "test submission"],
+    "assessment": ["test", "exam", "challenge", "coding test"],
+    "workspace": ["team", "project", "account"],
+}
+
+
 def _tokenize(text: str) -> List[str]:
     return re.findall(r"\w+", text.lower())
+
+
+def _expand_query(query: str) -> str:
+    """Expand query with synonyms for better retrieval recall."""
+    expanded = query.lower()
+    for term, synonyms in QUERY_EXPANSIONS.items():
+        if term in expanded:
+            for synonym in synonyms:
+                if synonym not in expanded:
+                    expanded += " " + synonym
+    return expanded
 
 
 class _CorpusRetriever:
@@ -49,7 +75,9 @@ class _CorpusRetriever:
         product_area_hint: str | None = None,
         first_pass_k: int = 12,
     ) -> List[Dict]:
-        query_tokens = _tokenize(query)
+        # Expand query with synonyms for better recall
+        expanded_query = _expand_query(query)
+        query_tokens = _tokenize(expanded_query)
         if not query_tokens:
             return []
 
@@ -71,7 +99,14 @@ class _CorpusRetriever:
                 overlap = self._keyword_overlap_score(hint, str(chunk.get("text", "")))
                 candidates.append((local_i, bm25_score, overlap))
             reranked = sorted(candidates, key=lambda x: (x[2], x[1]), reverse=True)[:top_k]
-            return [self.chunks[indexes[local_i]] for local_i, _, _ in reranked]
+            results = [self.chunks[indexes[local_i]] for local_i, _, _ in reranked]
+            
+            # If we got few results, try without company filter
+            if len(results) < top_k // 2:
+                all_results = self._retrieve_all(query, top_k - len(results), product_area_hint, first_pass_k)
+                results.extend([r for r in all_results if r not in results])
+            
+            return results[:top_k]
 
         if self.all_bm25 is None:
             return []
@@ -85,6 +120,17 @@ class _CorpusRetriever:
             candidates_all.append((i, bm25_score, overlap))
         reranked_all = sorted(candidates_all, key=lambda x: (x[2], x[1]), reverse=True)[:top_k]
         return [self.chunks[i] for i, _, _ in reranked_all]
+    
+    def _retrieve_all(
+        self,
+        query: str,
+        top_k: int,
+        product_area_hint: str | None = None,
+        first_pass_k: int = 12,
+    ) -> List[Dict]:
+        """Retrieve from entire corpus without company filter."""
+        return self.retrieve(query, company_filter=None, top_k=top_k, 
+                           product_area_hint=product_area_hint, first_pass_k=first_pass_k)
 
 
 _RETRIEVER = _CorpusRetriever()

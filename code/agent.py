@@ -71,20 +71,40 @@ def _detect_multi_request(text: str) -> bool:
 def _quick_product_area_hint(company: str, clean_text: str) -> str:
     text = clean_text.lower()
     if company == "visa":
-        if any(k in text for k in ("dispute", "chargeback", "unauthorized", "fraud")):
+        if any(k in text for k in ("dispute", "chargeback", "unauthorized", "fraud", "stolen")):
             return "Card Disputes"
-        if any(k in text for k in ("card", "payment", "transaction", "pin", "cvv")):
-            return "Billing & Payments"
+        if any(k in text for k in ("traveller", "traveler", "travel", "trip", "vacation")):
+            return "Travel Support"
+        if any(k in text for k in ("card", "payment", "transaction", "pin", "cvv", "minimum spend", "merchant")):
+            return "Card Management"
+        if any(k in text for k in ("cheque", "check")):
+            return "Traveller's Cheques"
     if company == "hackerrank":
-        if any(k in text for k in ("assessment", "test", "candidate", "proctor", "plagiarism")):
+        if any(k in text for k in ("assessment", "test", "candidate", "proctor", "plagiarism", "score")):
             return "Assessment Configuration"
-        if any(k in text for k in ("login", "access", "password", "account")):
+        if any(k in text for k in ("login", "access", "password", "account", "merge")):
             return "Account Access"
+        if any(k in text for k in ("interview", "interviewer", "lobby", "zoom")):
+            return "Interview Configuration"
+        if any(k in text for k in ("mock interview", "resume", "certificate")):
+            return "Candidate Experience"
+        if any(k in text for k in ("billing", "payment", "subscription", "pause", "cancel")):
+            return "Billing & Payments"
+        if any(k in text for k in ("submission", "not working", "down", "error")):
+            return "Candidate Experience"
     if company == "claude":
-        if any(k in text for k in ("billing", "invoice", "price", "plan")):
+        if any(k in text for k in ("billing", "invoice", "price", "plan", "subscription")):
             return "Billing & Payments"
         if any(k in text for k in ("project", "artifact", "conversation", "workspace")):
             return "Projects & Workspace"
+        if any(k in text for k in ("claude code", "code", "terminal", "bedrock")):
+            return "Claude Code"
+        if any(k in text for k in ("lti", "education", "student", "professor", "canvas")):
+            return "Claude for Education"
+        if any(k in text for k in ("privacy", "data", "crawling", "crawl")):
+            return "Privacy and Legal"
+        if any(k in text for k in ("vulnerability", "security", "bug bounty", "jailbreak")):
+            return "Safeguards"
     return "General Support"
 
 
@@ -168,17 +188,21 @@ Your task: analyze the support ticket and produce a JSON response with exactly t
 {_REQUEST_TYPE_GUIDE}
 
 Escalation rules (always escalate if ANY of these apply):
-1. The issue involves fraud, unauthorized transactions, account compromise, or financial disputes
+1. The issue involves fraud, unauthorized transactions, account compromise, identity theft, or financial disputes
 2. The issue requires you to DIRECTLY access, modify, or act upon the user's account on their behalf (e.g. restore access, change data for them) — NOT for self-service steps the user can do themselves (e.g. delete their own account following documented steps)
 3. The support documentation does not contain enough information to safely answer
 4. The ticket is threatening, abusive, or involves legal claims
 5. The issue is about a bug with potential data loss or security implications
+6. The issue involves merchant disputes or requires action against a third-party merchant
 
 Reply rules:
 1. Only include information that is explicitly stated in the provided documentation
 2. Do not speculate or fill gaps with general knowledge
-3. Keep response concise and actionable
+3. Keep response concise and actionable (2-4 sentences with concrete steps)
 4. If the documentation has clear step-by-step instructions, include them in the response
+5. If you cannot provide a helpful answer from the docs, escalate instead of giving a generic response
+
+Critical: For Visa merchant/minimum spend questions, retrieve the merchant rules or card usage documentation and answer from there. Do NOT escalate if the documentation contains relevant information.
 
 Respond with ONLY a valid JSON object. No markdown, no explanation outside the JSON."""
 
@@ -210,16 +234,42 @@ Produce the JSON triage output now."""
 
 
 def _extract_json(raw: str) -> Dict | None:
+    """Extract JSON from LLM response with multiple fallback strategies."""
+    # Strategy 1: Direct parse
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if not match:
-            return None
+        pass
+    
+    # Strategy 2: Extract from markdown code blocks
+    cleaned = re.sub(r'```(?:json)?\s*', '', raw).replace('```', '').strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 3: Regex extraction of JSON object
+    match = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+    if match:
         try:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
-            return None
+            pass
+    
+    # Strategy 4: Line-by-line key-value extraction (last resort)
+    try:
+        result = {}
+        for key in ['status', 'product_area', 'response', 'justification', 'request_type']:
+            pattern = rf'"{key}"\s*:\s*"([^"]*)"'
+            m = re.search(pattern, raw)
+            if m:
+                result[key] = m.group(1)
+        if len(result) >= 3:  # If we got at least 3 fields
+            return result
+    except Exception:
+        pass
+    
+    return None
 
 
 def _validate_output(data: Dict) -> Dict:
@@ -242,6 +292,28 @@ def _validate_output(data: Dict) -> Dict:
     out["justification"] = str(out["justification"]).strip() or SAFE_ESCALATION_FALLBACK["justification"]
 
     return out
+
+
+def _check_response_quality(response: str, docs: List[Dict]) -> bool:
+    """Check if response is substantive and grounded in corpus."""
+    if not response or len(response.strip()) < 30:
+        return False
+    
+    lower = response.lower()
+    # Flag responses that admit ignorance without providing help
+    weak_phrases = [
+        "i'm sorry, i cannot",
+        "i am unable to",
+        "out of scope from my capabilities",
+        "does not contain enough information",
+        "i don't have access",
+    ]
+    has_weak_phrases = any(phrase in lower for phrase in weak_phrases)
+    
+    # If response has weak phrases but no concrete steps, it's low quality
+    has_concrete = any(hint in lower for hint in CONCRETE_STEP_HINTS)
+    
+    return not (has_weak_phrases and not has_concrete)
 
 
 def _low_confidence_response(text: str) -> bool:
@@ -302,20 +374,37 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
         retry_user_prompt = user_prompt + "\n\nYour previous response was not valid JSON. Respond with ONLY a JSON object."
         raw_retry = call_llm(system_prompt, retry_user_prompt, temperature=0.0)
         parsed = _extract_json(raw_retry)
+        
         if parsed is None:
-            fallback = dict(SAFE_ESCALATION_FALLBACK)
-            fallback["_meta"] = {
-                "row_id": row_id,
-                "company": detected_company,
-                "confidence_score": 0.1,
-                "chunks_used": [f"{d.get('source_file','unknown')}#{d.get('chunk_id',0)}" for d in docs],
-                "escalation_reason": "corpus_insufficient",
-            }
-            cache[cache_key] = fallback
-            _save_cache(cache)
-            return fallback
+            # Third attempt: ultra-simplified prompt
+            simple_system = "Return ONLY a JSON object with these fields: status, product_area, response, justification, request_type"
+            simple_user = f"Ticket: {issue[:500]}. Company: {company_name}. Return JSON now."
+            raw_retry2 = call_llm(simple_system, simple_user, temperature=0.0)
+            parsed = _extract_json(raw_retry2)
+            
+            if parsed is None:
+                # Final fallback: try to construct minimal valid response
+                fallback = dict(SAFE_ESCALATION_FALLBACK)
+                fallback["_meta"] = {
+                    "row_id": row_id,
+                    "company": detected_company,
+                    "confidence_score": 0.1,
+                    "chunks_used": [f"{d.get('source_file','unknown')}#{d.get('chunk_id',0)}" for d in docs],
+                    "escalation_reason": "corpus_insufficient",
+                }
+                cache[cache_key] = fallback
+                _save_cache(cache)
+                return fallback
 
     validated = _validate_output(parsed)
+
+    # Quality check: if response is weak, escalate instead
+    if validated["status"] == "replied" and not _check_response_quality(validated["response"], docs):
+        validated["status"] = "escalated"
+        validated["justification"] = (
+            f"Escalated (low_quality_response): {validated['justification']} "
+            f"Response lacked specificity or actionable guidance."
+        ).strip()
 
     if (
         enriched.get("is_sensitive_domain")

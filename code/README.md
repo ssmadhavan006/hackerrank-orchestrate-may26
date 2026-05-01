@@ -26,6 +26,10 @@ Output row: status | product_area | response | justification | request_type
 
 **Escalation-first design:** Any ticket involving fraud, identity, legal claims, or injections is escalated *before* the LLM is called. The LLM is only invoked for safe routing decisions.
 
+## Safety Architecture
+
+The safety layer runs before and after generation. In `preprocessor.py`, the agent detects prompt-injection patterns (including multilingual variants) and sensitive risk signals; malicious tickets are immediately routed to `escalated` with `invalid` request type. In `agent.py`, escalation taxonomy labels capture why a case was escalated (for example fraud/financial risk, legal/compliance, corpus insufficiency), and low-quality or low-confidence replies are converted to escalation. Every row also gets confidence metadata and retrieved source trace IDs in `_meta`, and `run_log.jsonl`/`security_log.txt` keep auditable decision traces.
+
 ---
 
 ## 1) Prerequisites

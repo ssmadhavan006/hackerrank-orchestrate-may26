@@ -17,6 +17,10 @@ KEYWORDS: Dict[str, List[str]] = {
         "proctoring",
         "plagiarism",
         "hiring",
+        "mock interview",
+        "resume builder",
+        "certification",
+        "submission",
     ],
     "claude": [
         "claude",
@@ -27,6 +31,9 @@ KEYWORDS: Dict[str, List[str]] = {
         "project",
         "claude pro",
         "claude team",
+        "claude code",
+        "bedrock",
+        "lti",
     ],
     "visa": [
         "visa",
@@ -39,6 +46,8 @@ KEYWORDS: Dict[str, List[str]] = {
         "pin",
         "contactless",
         "dispute",
+        "traveller's cheque",
+        "traveler's check",
     ],
 }
 
@@ -94,11 +103,14 @@ SENSITIVE_PATTERNS = [
     "unauthorized",
     "dispute",
     "account hacked",
+    "account compromised",
     "stolen",
     "chargeback",
     "legal",
     "lawsuit",
     "refund",
+    "identity theft",
+    "identity stolen",
 ]
 
 
@@ -118,11 +130,18 @@ def _detect_company(company_raw: str, text: str) -> str:
     if normalized_company in COMPANIES:
         return normalized_company
 
-    if normalized_company in {"none", ""}:
+    if normalized_company in {"none", "", "nan"}:
         scores = {}
         lower_text = text.lower()
         for company, keywords in KEYWORDS.items():
-            scores[company] = sum(lower_text.count(keyword) for keyword in keywords)
+            # Weight multi-word keywords higher
+            score = 0
+            for keyword in keywords:
+                if ' ' in keyword:  # Multi-word
+                    score += lower_text.count(keyword) * 2
+                else:
+                    score += lower_text.count(keyword)
+            scores[company] = score
 
         max_score = max(scores.values(), default=0)
         if max_score == 0:

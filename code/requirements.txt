@@ -1,5 +1,6 @@
 rank-bm25==0.2.2
 openai==1.30.0
+httpx==0.27.2
 python-dotenv==1.0.1
 pandas==2.2.2
 tqdm==4.66.4

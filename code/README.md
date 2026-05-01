@@ -61,8 +61,19 @@ This reports:
 
 ## 8) Final submission checklist
 1. `python code/ingest.py`
-2. `python code/main.py --sample --dry-run 5`
+2. `python code/main.py --sample`
 3. `python code/evaluate.py`
 4. `python code/main.py`
 5. Confirm `support_tickets/output.csv` row count matches `support_tickets/support_tickets.csv`
 6. Confirm no empty cells in output CSV
+
+## 9) Build upload artifacts
+From repo root:
+```bash
+python code/package_submission.py
+```
+
+This creates `submission_artifacts/` with:
+- `code_submission.zip` (code-only package; excludes `.env`, `__pycache__`, `.pyc`, local cache)
+- `predictions_output.csv` (copied from active tickets folder output)
+- `chat_log.txt` (copied from user home log path)

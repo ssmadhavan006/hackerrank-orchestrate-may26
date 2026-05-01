@@ -33,6 +33,7 @@ HEDGE_WORDS = ("i'm not sure", "not sure", "may", "might", "possibly", "perhaps"
 CONCRETE_STEP_HINTS = ("go to", "click", "contact", "visit", "follow", "submit", "provide", "check")
 RUN_LOG_PATH = Path(__file__).resolve().parent / "run_log.jsonl"
 SECURITY_LOG_PATH = Path(__file__).resolve().parent / "security_log.txt"
+DECISION_CACHE_PATH = Path(__file__).resolve().parent / "decision_cache.json"
 
 
 def _log_security_event(pattern: str, text: str) -> None:
@@ -40,6 +41,20 @@ def _log_security_event(pattern: str, text: str) -> None:
     safe_preview = text.replace("\n", " ")[:240]
     with SECURITY_LOG_PATH.open("a", encoding="utf-8", newline="\n") as f:
         f.write(f"[{ts}] malicious_pattern={pattern} preview={safe_preview}\n")
+
+
+def _load_cache() -> Dict[str, Dict]:
+    if not DECISION_CACHE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(DECISION_CACHE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_cache(cache: Dict[str, Dict]) -> None:
+    DECISION_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
 
 
 def _detect_multi_request(text: str) -> bool:
@@ -204,6 +219,14 @@ def _low_confidence_response(text: str) -> bool:
 
 def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     enriched = preprocess(row)
+    cache_key = f"{str(enriched.get('detected_company','unknown')).lower()}||{str(enriched.get('clean_text','')).strip().lower()}"
+    cache = _load_cache()
+    if cache_key in cache:
+        cached = dict(cache[cache_key])
+        cached_meta = dict(cached.get("_meta", {}))
+        cached_meta["row_id"] = row_id
+        cached["_meta"] = cached_meta
+        return cached
 
     if enriched["is_potentially_malicious"]:
         _log_security_event(enriched.get("malicious_pattern", "unknown"), enriched.get("clean_text", ""))
@@ -215,6 +238,8 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
             "chunks_used": [],
             "escalation_reason": "abusive_or_malicious_input",
         }
+        cache[cache_key] = out
+        _save_cache(cache)
         return out
 
     detected_company = str(enriched.get("detected_company", "unknown"))
@@ -251,6 +276,8 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
                 "chunks_used": [f"{d.get('source_file','unknown')}#{d.get('chunk_id',0)}" for d in docs],
                 "escalation_reason": "corpus_insufficient",
             }
+            cache[cache_key] = fallback
+            _save_cache(cache)
             return fallback
 
     validated = _validate_output(parsed)
@@ -283,5 +310,7 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
         "chunks_used": [f"{d.get('source_file','unknown')}#{d.get('chunk_id',0)}" for d in docs],
         "escalation_reason": escalation_reason,
     }
+    cache[cache_key] = validated
+    _save_cache(cache)
 
     return validated

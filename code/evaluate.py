@@ -19,8 +19,11 @@ def _find_col(df: pd.DataFrame, *candidates: str) -> str:
 
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
-    sample_path = root / "support_tickets" / "sample_support_tickets.csv"
-    pred_path = root / "support_tickets" / "output_sample.csv"
+    tickets_dir = root / "support_tickets"
+    issues_dir = root / "support_issues"
+    active_dir = tickets_dir if tickets_dir.exists() else issues_dir
+    sample_path = active_dir / "sample_support_tickets.csv"
+    pred_path = active_dir / "output_sample.csv"
 
     gold = pd.read_csv(sample_path)
     pred = pd.read_csv(pred_path)
@@ -81,4 +84,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

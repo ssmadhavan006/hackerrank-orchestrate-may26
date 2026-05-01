@@ -17,9 +17,12 @@ RUN_LOG_PATH = Path(__file__).resolve().parent / "run_log.jsonl"
 
 def _parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parent.parent
-    default_input = root / "support_tickets" / "support_tickets.csv"
-    default_output = root / "support_tickets" / "output.csv"
-    sample_input = root / "support_tickets" / "sample_support_tickets.csv"
+    tickets_dir = root / "support_tickets"
+    issues_dir = root / "support_issues"
+    active_dir = tickets_dir if tickets_dir.exists() else issues_dir
+    default_input = active_dir / "support_tickets.csv"
+    default_output = active_dir / "output.csv"
+    sample_input = active_dir / "sample_support_tickets.csv"
 
     parser = argparse.ArgumentParser(description="HackerRank Orchestrate support agent runner")
     parser.add_argument("--input", default=str(default_input))

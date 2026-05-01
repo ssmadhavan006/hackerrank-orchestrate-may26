@@ -102,19 +102,32 @@ def _contains_any(text: str, patterns: List[str]) -> bool:
     return any(pattern in lower_text for pattern in patterns)
 
 
+def _first_matching_pattern(text: str, patterns: List[str]) -> str | None:
+    lower_text = text.lower()
+    for pattern in patterns:
+        if pattern in lower_text:
+            return pattern
+    return None
+
+
 def preprocess(row: dict) -> dict:
     subject = str(row.get("subject", "") or "")
     issue = str(row.get("issue", "") or "")
     company_raw = str(row.get("company", "") or "")
 
     clean_text = _truncate_words(_normalize_space(f"{subject} {issue}"))
+    if not clean_text:
+        clean_text = "No subject provided."
     detected_company = _detect_company(company_raw, clean_text)
+
+    malicious_pattern = _first_matching_pattern(clean_text, MALICIOUS_PATTERNS)
 
     return {
         **row,
         "detected_company": detected_company,
         "clean_text": clean_text,
-        "is_potentially_malicious": _contains_any(clean_text, MALICIOUS_PATTERNS),
+        "is_potentially_malicious": malicious_pattern is not None,
+        "malicious_pattern": malicious_pattern or "",
         "is_sensitive_domain": _contains_any(clean_text, SENSITIVE_PATTERNS),
     }
 

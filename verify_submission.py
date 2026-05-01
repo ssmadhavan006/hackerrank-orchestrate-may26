@@ -16,7 +16,7 @@ print(f"[OK] Output predictions: {len(output)} rows")
 print(f"[{'OK' if row_match else 'FAIL'}] Row count match: {row_match}")
 print(f"[{'OK' if empty_cells == 0 else 'FAIL'}] Empty cells: {empty_cells}")
 
-required_cols = {"status", "product_area", "response", "justification", "request_type"}
+required_cols = {"status", "product_area", "response", "justification", "request_type", "confidence", "domains_involved"}
 all_cols_present = required_cols.issubset(set(output.columns))
 print(f"[{'OK' if all_cols_present else 'FAIL'}] All columns present: {all_cols_present}")
 
@@ -24,9 +24,11 @@ valid_status = {"replied", "escalated"}
 valid_types = {"product_issue", "feature_request", "bug", "invalid"}
 status_valid = set(output['status'].unique()).issubset(valid_status)
 request_valid = set(output['request_type'].unique()).issubset(valid_types)
+confidence_valid = output["confidence"].between(0.0, 1.0, inclusive="both").all()
 
 print(f"[{'OK' if status_valid else 'FAIL'}] Valid status values: {status_valid}")
 print(f"[{'OK' if request_valid else 'FAIL'}] Valid request_types: {request_valid}")
+print(f"[{'OK' if confidence_valid else 'FAIL'}] Valid confidence range [0,1]: {confidence_valid}")
 
 print("\n" + "=" * 60)
 print("DISTRIBUTION ANALYSIS")

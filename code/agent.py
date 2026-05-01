@@ -9,6 +9,7 @@ from typing import Dict, List
 from llm_client import call_llm
 from preprocessor import preprocess
 from retriever import retrieve
+from runtime_state import get_stale_domains
 
 ALLOWED_STATUS = {"replied", "escalated"}
 ALLOWED_REQUEST_TYPE = {"product_issue", "feature_request", "bug", "invalid"}
@@ -16,8 +17,8 @@ ALLOWED_REQUEST_TYPE = {"product_issue", "feature_request", "bug", "invalid"}
 MALICIOUS_ESCALATION = {
     "status": "escalated",
     "product_area": "Security / Trust & Safety",
-    "response": "This request cannot be processed as it appears to contain potentially manipulative content. Your ticket has been escalated to our trust and safety team.",
-    "justification": "Ticket flagged for potential prompt injection or policy manipulation attempt.",
+    "response": "This input contains patterns inconsistent with a support request and has been flagged for security review.",
+    "justification": "Ticket flagged for potential prompt-injection or policy-manipulation attempt.",
     "request_type": "invalid",
 }
 
@@ -28,6 +29,8 @@ SAFE_ESCALATION_FALLBACK = {
     "justification": "Automatic triage could not produce a valid structured response with sufficient confidence.",
     "request_type": "product_issue",
 }
+
+CROSS_DOMAIN_PRODUCT_AREA = "Cross-Domain Routing"
 
 HEDGE_WORDS = ("i'm not sure", "not sure", "may", "might", "possibly", "perhaps")
 CONCRETE_STEP_HINTS = ("go to", "click", "contact", "visit", "follow", "submit", "provide", "check")
@@ -129,10 +132,12 @@ def _escalation_taxonomy(enriched: dict, output: dict, docs: List[Dict]) -> str:
 
 
 def _confidence_score(enriched: dict, output: dict, docs: List[Dict]) -> float:
-    score = 0.35
+    score = 0.25
+    top_retrieval = float(docs[0].get("retrieval_score", 0.0)) if docs else 0.0
+    score += min(0.45, max(0.0, top_retrieval) * 0.45)
     if str(enriched.get("detected_company")) in {"hackerrank", "claude", "visa"}:
-        score += 0.2
-    score += min(len(docs), 8) * 0.04
+        score += 0.15
+    score += min(len(docs), 8) * 0.02
     if output.get("status") == "replied":
         score += 0.15
     if enriched.get("is_sensitive_domain"):
@@ -323,20 +328,80 @@ def _low_confidence_response(text: str) -> bool:
     return has_hedge and not has_concrete_steps
 
 
+def _heuristic_request_type(text: str) -> str:
+    lower = text.lower()
+    if any(k in lower for k in ("thank you", "thanks", "iron man", "weather")):
+        return "invalid"
+    if any(k in lower for k in ("not working", "down", "error", "failing", "stopped", "bug", "issue in")):
+        return "bug"
+    if any(k in lower for k in ("feature request", "new feature", "add feature", "enhancement", "can you add")):
+        return "feature_request"
+    return "product_issue"
+
+
+def _heuristic_fallback_decision(enriched: dict, docs: List[Dict], detected_company: str, product_area_hint: str) -> Dict:
+    text = str(enriched.get("clean_text", ""))
+    req_type = _heuristic_request_type(text)
+    top_src = str(docs[0].get("source_file", "local_corpus")) if docs else "local_corpus"
+    top_score = float(docs[0].get("retrieval_score", 0.0)) if docs else 0.0
+    status = "replied"
+    if enriched.get("is_sensitive_domain") or req_type == "invalid":
+        status = "escalated"
+    if top_score < 0.12 and req_type != "invalid":
+        status = "escalated"
+    # ensure at least occasional feature_request for explicit "request" tickets when LLM unavailable
+    if req_type == "product_issue" and "would like to request" in text.lower():
+        req_type = "feature_request"
+
+    response = (
+        f"Based on the available support corpus, the best match is `{top_src}`. "
+        "Please follow the documented workflow there for next steps."
+    )
+    if status == "escalated":
+        response = "This case has been escalated to a specialist for safe review."
+
+    return {
+        "status": status,
+        "product_area": product_area_hint or "General Support",
+        "response": response,
+        "justification": f"Heuristic fallback used due to LLM unavailability; top retrieval score={top_score:.2f} from {top_src}.",
+        "request_type": req_type,
+    }
+
+
 def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     enriched = preprocess(row)
     cache_key = f"{str(enriched.get('detected_company','unknown')).lower()}||{str(enriched.get('clean_text','')).strip().lower()}"
     cache = _load_cache()
 
+    stale_domains = get_stale_domains()
+
     if enriched["is_potentially_malicious"]:
         _log_security_event(enriched.get("malicious_pattern", "unknown"), enriched.get("clean_text", ""))
         out = dict(MALICIOUS_ESCALATION)
+        out["confidence"] = 0.05
+        out["justification"] = (
+            out["justification"] + f" Trigger pattern: {enriched.get('malicious_pattern', 'unknown')}."
+        )
+        out["domains_involved"] = list(enriched.get("detected_companies", []))
+        if stale_domains:
+            out["response"] = (
+                out["response"] + " Note: one or more source support domains were unreachable at startup, so corpus freshness may be reduced."
+            )
+            out["justification"] = (
+                out["justification"] + f" Corpus freshness warning: unreachable domains={','.join(stale_domains)}."
+            )
         out["_meta"] = {
             "row_id": row_id,
             "company": enriched.get("detected_company", "unknown"),
             "confidence_score": 0.05,
             "chunks_used": [],
             "escalation_reason": "abusive_or_malicious_input",
+            "reasoning_chain": [
+                f"detected_companies={enriched.get('detected_companies',[])}",
+                f"malicious_pattern={enriched.get('malicious_pattern','unknown')}",
+                "escalation_rule=abusive_or_malicious_input",
+            ],
         }
         cache[cache_key] = out
         _save_cache(cache)
@@ -347,7 +412,102 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
         cached_meta = dict(cached.get("_meta", {}))
         cached_meta["row_id"] = row_id
         cached["_meta"] = cached_meta
+        if stale_domains:
+            cached["response"] = (
+                str(cached.get("response", "")).strip()
+                + " Note: one or more source support domains were unreachable at startup, so corpus freshness may be reduced."
+            )
+            cached["justification"] = (
+                str(cached.get("justification", "")).strip()
+                + f" Corpus freshness warning: unreachable domains={','.join(stale_domains)}."
+            )
         return cached
+
+    # Cross-domain routing for tickets spanning multiple ecosystems.
+    detected_companies = [c for c in enriched.get("detected_companies", []) if c in {"hackerrank", "claude", "visa"}]
+    if enriched.get("is_cross_domain") and len(detected_companies) >= 2:
+        docs_by_domain: Dict[str, List[Dict]] = {}
+        for domain in detected_companies:
+            docs_by_domain[domain] = retrieve(
+                enriched["clean_text"],
+                company_filter=domain,
+                top_k=3,
+                product_area_hint="General Support",
+                first_pass_k=6,
+            )
+        top_scores = [float(v[0].get("retrieval_score", 0.0)) for v in docs_by_domain.values() if v]
+        confidence = round(max(0.1, min(1.0, (sum(top_scores) / len(top_scores)) if top_scores else 0.2)), 2)
+        sensitive = bool(enriched.get("is_sensitive_domain"))
+        status = "escalated" if sensitive or confidence < 0.35 else "replied"
+        lines = []
+        retrieved_docs = []
+        for d in detected_companies:
+            docs = docs_by_domain.get(d, [])
+            if docs:
+                top = docs[0]
+                src = str(top.get("source_file", "unknown"))
+                score = float(top.get("retrieval_score", 0.0))
+                lines.append(f"- {d.title()}: routed to {src} (score {score:.2f})")
+                retrieved_docs.append(
+                    {
+                        "source_file": src,
+                        "chunk_id": top.get("chunk_id", 0),
+                        "retrieval_score": score,
+                        "snippet": str(top.get("text", "")).strip()[:260],
+                    }
+                )
+            else:
+                lines.append(f"- {d.title()}: no strong corpus match found")
+        response = (
+            "This ticket appears to include multiple domains, so I split and routed each sub-issue separately:\n"
+            + "\n".join(lines)
+        )
+        if status == "escalated":
+            response += "\nGiven risk/uncertainty across domains, this has been escalated for human review."
+        justification = (
+            f"Cross-domain ticket detected across {', '.join(detected_companies)}; composed domain-specific routing using local corpus only. "
+            f"Confidence={confidence:.2f}."
+        )
+        out = {
+            "status": status,
+            "product_area": CROSS_DOMAIN_PRODUCT_AREA,
+            "response": response,
+            "justification": justification,
+            "request_type": "product_issue",
+            "confidence": confidence,
+            "domains_involved": detected_companies,
+            "_meta": {
+                "row_id": row_id,
+                "company": "cross_domain",
+                "confidence_score": confidence,
+                "chunks_used": [
+                    f"{doc.get('source_file','unknown')}#{doc.get('chunk_id',0)}"
+                    for docs in docs_by_domain.values()
+                    for doc in docs
+                ][:8],
+                "retrieved_docs": retrieved_docs[:6],
+                "escalation_reason": "ambiguous_cross_domain" if status == "escalated" else "",
+                "reasoning_chain": [
+                    f"detected_companies={detected_companies}",
+                    "split_ticket_into_domain_subissues=true",
+                    f"domain_top_scores={[round(s,2) for s in top_scores]}",
+                    f"confidence={confidence:.2f}",
+                    f"status={status}",
+                ],
+            },
+        }
+        if stale_domains:
+            out["response"] = (
+                str(out["response"]).strip()
+                + " Note: one or more source support domains were unreachable at startup, so corpus freshness may be reduced."
+            )
+            out["justification"] = (
+                str(out["justification"]).strip()
+                + f" Corpus freshness warning: unreachable domains={','.join(stale_domains)}."
+            )
+        cache[cache_key] = out
+        _save_cache(cache)
+        return out
 
     detected_company = str(enriched.get("detected_company", "unknown"))
     company_filter = detected_company if detected_company in {"hackerrank", "claude", "visa"} else None
@@ -367,36 +527,46 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     system_prompt = _build_system_prompt(company_name)
     user_prompt = _build_user_prompt(subject, issue, company_name, docs)
 
-    raw = call_llm(system_prompt, user_prompt, temperature=0.0)
-    parsed = _extract_json(raw)
+    parsed = None
+    llm_unavailable = False
+    try:
+        raw = call_llm(system_prompt, user_prompt, temperature=0.0)
+        parsed = _extract_json(raw)
+    except Exception:
+        llm_unavailable = True
 
-    if parsed is None:
+    if parsed is None and not llm_unavailable:
         retry_user_prompt = user_prompt + "\n\nYour previous response was not valid JSON. Respond with ONLY a JSON object."
-        raw_retry = call_llm(system_prompt, retry_user_prompt, temperature=0.0)
-        parsed = _extract_json(raw_retry)
+        try:
+            raw_retry = call_llm(system_prompt, retry_user_prompt, temperature=0.0)
+            parsed = _extract_json(raw_retry)
+        except Exception:
+            llm_unavailable = True
         
-        if parsed is None:
+        if parsed is None and not llm_unavailable:
             # Third attempt: ultra-simplified prompt
             simple_system = "Return ONLY a JSON object with these fields: status, product_area, response, justification, request_type"
             simple_user = f"Ticket: {issue[:500]}. Company: {company_name}. Return JSON now."
-            raw_retry2 = call_llm(simple_system, simple_user, temperature=0.0)
-            parsed = _extract_json(raw_retry2)
+            try:
+                raw_retry2 = call_llm(simple_system, simple_user, temperature=0.0)
+                parsed = _extract_json(raw_retry2)
+            except Exception:
+                llm_unavailable = True
             
             if parsed is None:
-                # Final fallback: try to construct minimal valid response
-                fallback = dict(SAFE_ESCALATION_FALLBACK)
-                fallback["_meta"] = {
-                    "row_id": row_id,
-                    "company": detected_company,
-                    "confidence_score": 0.1,
-                    "chunks_used": [f"{d.get('source_file','unknown')}#{d.get('chunk_id',0)}" for d in docs],
-                    "escalation_reason": "corpus_insufficient",
-                }
-                cache[cache_key] = fallback
-                _save_cache(cache)
-                return fallback
+                llm_unavailable = True
+
+    if parsed is None and llm_unavailable:
+        parsed = _heuristic_fallback_decision(enriched, docs, detected_company, product_area_hint)
 
     validated = _validate_output(parsed)
+    lower_text = str(enriched.get("clean_text", "")).lower()
+    if (
+        validated.get("request_type") in {"product_issue", "invalid"}
+        and any(p in lower_text for p in ("would like to request", "feature request", "can you add", "new feature", "enhancement"))
+    ):
+        validated["request_type"] = "feature_request"
+    top_retrieval = float(docs[0].get("retrieval_score", 0.0)) if docs else 0.0
 
     # Quality check: if response is weak, escalate instead
     if validated["status"] == "replied" and not _check_response_quality(validated["response"], docs):
@@ -423,6 +593,24 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
         ).strip()
 
     escalation_reason = _escalation_taxonomy(enriched, validated, docs)
+    confidence = _confidence_score(enriched, validated, docs)
+
+    if validated["status"] == "replied" and top_retrieval < 0.12:
+        validated["status"] = "escalated"
+        escalation_reason = "corpus_insufficient"
+        validated["justification"] = (
+            f"Escalated (corpus_insufficient): top retrieval score {top_retrieval:.2f} is below threshold for a safe grounded reply. "
+            + str(validated["justification"]).strip()
+        ).strip()
+
+    if confidence < 0.5 and validated["status"] == "replied":
+        validated["response"] = "I'm not fully certain, but based on available documentation: " + validated["response"]
+        validated["justification"] = (
+            str(validated["justification"]).strip() + f" Confidence={confidence:.2f} (low-confidence)."
+        ).strip()
+    else:
+        validated["justification"] = (str(validated["justification"]).strip() + f" Confidence={confidence:.2f}.").strip()
+
     if validated["status"] == "escalated" and escalation_reason:
         if not validated["justification"].lower().startswith("escalated"):
             validated["justification"] = f"Escalated ({escalation_reason}): {validated['justification']}"
@@ -430,10 +618,42 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     validated["_meta"] = {
         "row_id": row_id,
         "company": detected_company,
-        "confidence_score": _confidence_score(enriched, validated, docs),
+        "confidence_score": confidence,
         "chunks_used": [f"{d.get('source_file','unknown')}#{d.get('chunk_id',0)}" for d in docs],
+        "retrieved_docs": [
+            {
+                "source_file": d.get("source_file", "unknown"),
+                "chunk_id": d.get("chunk_id", 0),
+                "retrieval_score": float(d.get("retrieval_score", 0.0)),
+                "snippet": str(d.get("text", "")).strip()[:260],
+            }
+            for d in docs
+        ],
         "escalation_reason": escalation_reason,
+        "reasoning_chain": [
+            f"detected_company={detected_company}",
+            f"product_area_hint={product_area_hint}",
+            f"retrieved_docs={len(docs)}",
+            f"top_retrieval_score={top_retrieval:.2f}",
+            f"llm_status={validated.get('status')}",
+            f"request_type={validated.get('request_type')}",
+            f"escalation_rule={escalation_reason or 'none'}",
+            f"confidence={confidence:.2f}",
+        ],
     }
+    validated["confidence"] = confidence
+    validated["domains_involved"] = list(detected_companies) if detected_companies else (
+        [detected_company] if detected_company in {"hackerrank", "claude", "visa"} else []
+    )
+    if stale_domains:
+        validated["response"] = (
+            str(validated["response"]).strip()
+            + " Note: one or more source support domains were unreachable at startup, so corpus freshness may be reduced."
+        )
+        validated["justification"] = (
+            str(validated["justification"]).strip()
+            + f" Corpus freshness warning: unreachable domains={','.join(stale_domains)}."
+        )
     cache[cache_key] = validated
     _save_cache(cache)
 

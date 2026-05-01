@@ -57,6 +57,9 @@ MALICIOUS_PATTERNS = [
     "ignore all previous",
     "you are now",
     "pretend you are",
+    "pretend you are a different system",
+    "pretend to be",
+    "you are a different system",
     "disregard",
     "disregard all",
     "jailbreak",
@@ -69,6 +72,8 @@ MALICIOUS_PATTERNS = [
     "display your rules",
     "what is your system prompt",
     "override your",
+    "base64",
+    "decode this",
     # destructive / harmful asks
     "delete all files",
     "remove all files",
@@ -155,6 +160,15 @@ def _detect_company(company_raw: str, text: str) -> str:
     return "unknown"
 
 
+def _detect_all_companies(text: str) -> List[str]:
+    lower_text = text.lower()
+    found: List[str] = []
+    for company, keywords in KEYWORDS.items():
+        if any(k in lower_text for k in keywords):
+            found.append(company)
+    return sorted(set(found))
+
+
 def _contains_any(text: str, patterns: List[str]) -> bool:
     lower_text = text.lower()
     return any(pattern in lower_text for pattern in patterns)
@@ -177,15 +191,25 @@ def preprocess(row: dict) -> dict:
     if not clean_text:
         clean_text = "No subject provided."
     detected_company = _detect_company(company_raw, clean_text)
+    detected_companies = _detect_all_companies(clean_text)
+    if detected_company != "unknown" and detected_company not in detected_companies:
+        detected_companies.append(detected_company)
+        detected_companies = sorted(set(detected_companies))
 
     malicious_pattern = _first_matching_pattern(clean_text, MALICIOUS_PATTERNS)
+    if malicious_pattern is None:
+        # Base64-like long payload detection (common obfuscation attempt)
+        b64_like = re.search(r"\b(?:[A-Za-z0-9+/]{40,}={0,2})\b", clean_text)
+        if b64_like:
+            malicious_pattern = "base64_encoded_payload"
 
     return {
         **row,
         "detected_company": detected_company,
+        "detected_companies": detected_companies,
+        "is_cross_domain": len(detected_companies) >= 2,
         "clean_text": clean_text,
         "is_potentially_malicious": malicious_pattern is not None,
         "malicious_pattern": malicious_pattern or "",
         "is_sensitive_domain": _contains_any(clean_text, SENSITIVE_PATTERNS),
     }
-

@@ -94,7 +94,8 @@ def _escalation_taxonomy(enriched: dict, output: dict, docs: List[Dict]) -> str:
         return "abusive_or_malicious_input"
     if any(k in text for k in ("fraud", "unauthorized", "chargeback", "dispute", "stolen")):
         return "fraud_or_financial_risk"
-    if any(k in text for k in ("account", "password", "login", "verify identity", "unlock")):
+    # Only escalate for explicit account compromise / identity verification — not generic "account" mentions
+    if any(k in text for k in ("account hacked", "account compromised", "verify identity", "unlock account", "account locked")):
         return "account_access_required"
     if any(k in text for k in ("legal", "lawsuit", "compliance", "regulatory")):
         return "legal_or_compliance"
@@ -123,20 +124,52 @@ def _confidence_score(enriched: dict, output: dict, docs: List[Dict]) -> float:
     return round(max(0.0, min(1.0, score)), 2)
 
 
+_COMPANY_PRODUCT_AREAS = {
+    "hackerrank": [
+        "Account Access", "Assessment Configuration", "Interview Configuration",
+        "Billing & Payments", "Certifications", "Integrations",
+        "Candidate Experience", "Proctoring & Security", "General Support",
+    ],
+    "claude": [
+        "Account Management", "Billing & Payments", "Claude Code",
+        "Claude for Education", "Claude for Nonprofits", "Privacy and Legal",
+        "Safeguards", "Projects & Workspace", "API & Console",
+        "Mobile & Desktop Apps", "General Support",
+    ],
+    "visa": [
+        "Card Disputes", "Billing & Payments", "Fraud & Security",
+        "Travel Support", "Card Management", "Merchant Issues",
+        "Traveller's Cheques", "General Support",
+    ],
+}
+
+_REQUEST_TYPE_GUIDE = """
+request_type definitions — choose exactly one, DO NOT default to "product_issue" without checking the others first:
+- "bug": user reports a technical malfunction, system outage, broken feature, error, crash, or that something is not working (examples: "site is down", "submissions not working", "Claude Code stopped working", "nothing loads", "I keep getting an error"). Use "bug" for ANY report that something is broken or down.
+- "feature_request": user explicitly asks for a new capability, enhancement, or something that does not currently exist (example: "can you add a feature for X")
+- "invalid": ticket is spam, a social pleasantry ("thank you", "hello", "you're welcome"), completely unrelated to the company, or contains malicious/out-of-scope content (examples: "Who played Iron Man?", "Thank you for helping me", "What is the weather today?")
+- "product_issue": all other tickets — how-to questions, billing/access/configuration help, policy questions, refund requests, account setup/management where the platform is working but the user needs guidance
+Critical: if the user says anything is "not working", "down", "failing", "broken", "error", or "stopped", classify as "bug" NOT "product_issue"."""
+
+
 def _build_system_prompt(company: str) -> str:
+    areas = _COMPANY_PRODUCT_AREAS.get(company, ["General Support"])
+    areas_list = ", ".join(f'"{a}"' for a in areas)
     return f"""You are a support triage agent for {company}. You must answer ONLY using the provided support documentation. Never invent policies, steps, or facts not present in the documentation.
 Output format is strict: return exactly one JSON object with no markdown fences and no extra text before or after the JSON object.
 
 Your task: analyze the support ticket and produce a JSON response with exactly these fields:
 - status: "replied" or "escalated"
-- product_area: the most specific relevant support category (e.g. "Billing & Payments", "Assessment Configuration", "Account Access", "Card Disputes")
+- product_area: choose the single most relevant category from this list for {company}: [{areas_list}]
 - response: a helpful, grounded, user-facing reply (2-4 sentences). If escalating, explain why and what the user should expect.
 - justification: 1-2 sentences explaining your routing decision and which docs informed it, and include source filenames from the provided docs (for example: "per data/visa/support/consumer/visa-rules.md")
 - request_type: one of "product_issue", "feature_request", "bug", "invalid"
 
+{_REQUEST_TYPE_GUIDE}
+
 Escalation rules (always escalate if ANY of these apply):
 1. The issue involves fraud, unauthorized transactions, account compromise, or financial disputes
-2. The issue requires accessing the user's account, verifying identity, or taking action on their behalf
+2. The issue requires you to DIRECTLY access, modify, or act upon the user's account on their behalf (e.g. restore access, change data for them) — NOT for self-service steps the user can do themselves (e.g. delete their own account following documented steps)
 3. The support documentation does not contain enough information to safely answer
 4. The ticket is threatening, abusive, or involves legal claims
 5. The issue is about a bug with potential data loss or security implications
@@ -145,6 +178,7 @@ Reply rules:
 1. Only include information that is explicitly stated in the provided documentation
 2. Do not speculate or fill gaps with general knowledge
 3. Keep response concise and actionable
+4. If the documentation has clear step-by-step instructions, include them in the response
 
 Respond with ONLY a valid JSON object. No markdown, no explanation outside the JSON."""
 

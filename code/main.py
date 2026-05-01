@@ -23,16 +23,20 @@ def _parse_args() -> argparse.Namespace:
     default_input = active_dir / "support_tickets.csv"
     default_output = active_dir / "output.csv"
     sample_input = active_dir / "sample_support_tickets.csv"
+    sample_output = active_dir / "output_sample.csv"
 
     parser = argparse.ArgumentParser(description="HackerRank Orchestrate support agent runner")
     parser.add_argument("--input", default=str(default_input))
     parser.add_argument("--output", default=str(default_output))
-    parser.add_argument("--sample", action="store_true", help="Use sample_support_tickets.csv as input")
+    parser.add_argument("--sample", action="store_true", help="Use sample_support_tickets.csv as input, output to output_sample.csv")
     parser.add_argument("--dry-run", type=int, default=None, help="Process only first N rows")
     args = parser.parse_args()
 
     if args.sample:
         args.input = str(sample_input)
+        # Only auto-set output if user hasn't explicitly provided one
+        if args.output == str(default_output):
+            args.output = str(sample_output)
     return args
 
 

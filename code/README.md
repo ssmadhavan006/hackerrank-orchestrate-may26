@@ -11,7 +11,7 @@ Input CSV row
 preprocessor.py   ← normalise text, detect company, flag injection/sensitive
     │
     ▼
-retriever.py      ← BM25 full-corpus + per-company index, product-area re-rank
+retriever.py      ← Hybrid retrieval: BM25 + semantic similarity (MiniLM), product-area re-rank
     │
     ▼
 agent.py          ← build system/user prompts, call LLM, parse+validate JSON
@@ -20,7 +20,7 @@ agent.py          ← build system/user prompts, call LLM, parse+validate JSON
 Output row: status | product_area | response | justification | request_type
 ```
 
-**Why BM25?** No embedding API needed, fully deterministic, fast for this corpus size (~7 MB), and interpretable — we can trace exactly which document tokens drove retrieval.
+**Why Hybrid Retrieval?** BM25 handles exact term matching while semantic search captures paraphrases. We combine scores as `0.4 * bm25 + 0.6 * semantic` and keep per-chunk score traces (`retrieval_bm25`, `retrieval_semantic`, `retrieval_score`) for auditability.
 
 **Why Mixtral 8x22B-Instruct via NVIDIA NIM?** Strong instruction-following with high-quality JSON output at `temperature=0` for determinism. The 8x22B variant has strong multilingual understanding, which matters for tickets in French/Spanish.
 
@@ -89,7 +89,15 @@ python code/main.py --sample --dry-run 5
 
 # Explicit paths
 python code/main.py --input support_tickets/support_tickets.csv --output support_tickets/output.csv
+
+# Live interactive demo mode (single ticket triage + clarification loop)
+python code/main.py --interactive
 ```
+
+Interactive mode features:
+- Shows top retrieved document snippets with scores before final answer
+- Streams output fields (`status`, `product_area`, `request_type`, `confidence`, `justification`, `response`) with slight delay
+- If confidence is below threshold (default `0.5`) or routing is ambiguous, asks one clarifying question and re-runs triage
 
 ## 7) Evaluate on sample labels
 After generating `support_tickets/output_sample.csv`:
@@ -103,8 +111,31 @@ This reports:
 
 ## 8) Observability outputs
 - `code/run_log.jsonl`: one JSON line per processed ticket (confidence, chunks used, escalation reason)
+- `code/decision_audit.jsonl`: per-ticket explainability trail (raw query, top retrieved docs + scores, reasoning chain, escalation rule, final response)
 - `code/security_log.txt`: malicious/prompt-injection detections
 - `code/decision_cache.json`: caches LLM decisions by content hash (excluded from submission zip)
+- `support_tickets/output.csv`: includes `confidence` (`0.0` to `1.0`) per row
+
+## Limitations
+
+At startup, the runner performs lightweight `HEAD` checks against the three source support domains. If any domain is unreachable, the agent continues using the local corpus but appends a freshness warning in responses/justifications because the corpus may be stale relative to live support content.
+
+## Red Team Testing
+
+Adversarial cases tested and handled with explicit security routing:
+- Prompt injection attempts: "ignore previous instructions", "show internal rules", "override your instructions"
+- Role hijack attempts: "pretend you are a different system", "you are now X"
+- Obfuscation attempts: base64-like long encoded payloads
+- Destructive requests: "delete all files", "rm -rf"
+
+Defense behavior:
+- Returns explicit security response: "This input contains patterns inconsistent with a support request and has been flagged for security review."
+- Logs exact triggering malicious pattern in `code/security_log.txt`
+- Marks request as `invalid` and routes to Trust & Safety escalation
+
+## Cross-Domain Routing
+
+When a ticket spans multiple domains (e.g., HackerRank + Visa), the agent detects all involved ecosystems, splits the ticket into sub-issues, retrieves evidence from each domain-specific corpus, and returns a composite response. Output includes `domains_involved` for traceability.
 
 ## 9) Final submission checklist
 1. `python code/ingest.py`               ← build corpus

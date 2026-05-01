@@ -110,12 +110,13 @@ def _confidence_score(enriched: dict, output: dict, docs: List[Dict]) -> float:
 
 def _build_system_prompt(company: str) -> str:
     return f"""You are a support triage agent for {company}. You must answer ONLY using the provided support documentation. Never invent policies, steps, or facts not present in the documentation.
+Output format is strict: return exactly one JSON object with no markdown fences and no extra text before or after the JSON object.
 
 Your task: analyze the support ticket and produce a JSON response with exactly these fields:
 - status: "replied" or "escalated"
 - product_area: the most specific relevant support category (e.g. "Billing & Payments", "Assessment Configuration", "Account Access", "Card Disputes")
 - response: a helpful, grounded, user-facing reply (2-4 sentences). If escalating, explain why and what the user should expect.
-- justification: 1-2 sentences explaining your routing decision and which docs informed it
+- justification: 1-2 sentences explaining your routing decision and which docs informed it, and include source filenames from the provided docs (for example: "per data/visa/support/consumer/visa-rules.md")
 - request_type: one of "product_issue", "feature_request", "bug", "invalid"
 
 Escalation rules (always escalate if ANY of these apply):
@@ -134,9 +135,15 @@ Respond with ONLY a valid JSON object. No markdown, no explanation outside the J
 
 
 def _build_user_prompt(subject: str, issue: str, company: str, docs: List[Dict]) -> str:
+    def truncate_words(text: str, max_words: int = 300) -> str:
+        words = text.split()
+        if len(words) <= max_words:
+            return text
+        return " ".join(words[:max_words])
+
     doc_blocks = []
     for chunk in docs:
-        text = str(chunk.get("text", "")).strip()
+        text = truncate_words(str(chunk.get("text", "")).strip(), max_words=300)
         src = str(chunk.get("source_file", "unknown"))
         if text:
             doc_blocks.append(f"---\n{text} [Source: {src}]")

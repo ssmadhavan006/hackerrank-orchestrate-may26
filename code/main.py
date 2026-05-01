@@ -51,7 +51,6 @@ def _normalize_row(row: pd.Series) -> dict:
 def main() -> None:
     args = _parse_args()
     start = time.time()
-    RUN_LOG_PATH.write_text("", encoding="utf-8", newline="\n")
 
     input_path = Path(args.input)
     output_path = Path(args.output)
@@ -63,6 +62,9 @@ def main() -> None:
 
     total = len(df)
     print(f"HackerRank Orchestrate Support Agent | Tickets to process: {total}")
+    run_started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with RUN_LOG_PATH.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps({"event": "run_start", "started_at": run_started_at, "total_tickets": total}) + "\n")
 
     # Warm retriever and ensure corpus has been loaded before loop.
     _ = retrieve("warmup", None, top_k=1)

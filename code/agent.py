@@ -255,12 +255,6 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     enriched = preprocess(row)
     cache_key = f"{str(enriched.get('detected_company','unknown')).lower()}||{str(enriched.get('clean_text','')).strip().lower()}"
     cache = _load_cache()
-    if cache_key in cache:
-        cached = dict(cache[cache_key])
-        cached_meta = dict(cached.get("_meta", {}))
-        cached_meta["row_id"] = row_id
-        cached["_meta"] = cached_meta
-        return cached
 
     if enriched["is_potentially_malicious"]:
         _log_security_event(enriched.get("malicious_pattern", "unknown"), enriched.get("clean_text", ""))
@@ -275,6 +269,13 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
         cache[cache_key] = out
         _save_cache(cache)
         return out
+
+    if cache_key in cache:
+        cached = dict(cache[cache_key])
+        cached_meta = dict(cached.get("_meta", {}))
+        cached_meta["row_id"] = row_id
+        cached["_meta"] = cached_meta
+        return cached
 
     detected_company = str(enriched.get("detected_company", "unknown"))
     company_filter = detected_company if detected_company in {"hackerrank", "claude", "visa"} else None

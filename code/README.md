@@ -57,7 +57,7 @@ This generates `code/corpus_chunks.json` (~7 MB) from:
 - `data/claude/`
 - `data/visa/`
 
-**This step is required before running the agent.** The corpus file is excluded from the submission zip to keep it small.
+**This step is required before running the agent.** The generated `corpus_chunks.json` is included in the submission zip for evaluator convenience.
 
 ## 5) Run unit tests
 From `code/`:

@@ -25,6 +25,7 @@ Output row: status | product_area | response | justification | request_type
 **Why Mixtral 8x22B-Instruct via NVIDIA NIM?** Strong instruction-following with high-quality JSON output at `temperature=0` for determinism. The 8x22B variant has strong multilingual understanding, which matters for tickets in French/Spanish.
 
 **Escalation-first design:** Any ticket involving fraud, identity, legal claims, or injections is escalated *before* the LLM is called. The LLM is only invoked for safe routing decisions.
+**Knowledge boundary:** The model is used strictly as a reasoning engine over retrieved local corpus chunks. It must not use external facts or live web knowledge for answers.
 
 ## Safety Architecture
 
@@ -34,7 +35,7 @@ The safety layer runs before and after generation. In `preprocessor.py`, the age
 
 ## 1) Prerequisites
 - Python 3.10+ (3.11 tested)
-- Internet access for NVIDIA-hosted LLM API
+- Internet access to NVIDIA-hosted LLM API only for inference transport (not for external knowledge retrieval)
 
 ## 2) NVIDIA API key setup
 1. Go to `https://build.nvidia.com/`

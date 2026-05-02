@@ -106,14 +106,11 @@ MALICIOUS_PATTERNS = [
 SENSITIVE_PATTERNS = [
     "fraud",
     "unauthorized",
-    "dispute",
     "account hacked",
     "account compromised",
     "stolen",
-    "chargeback",
     "legal",
     "lawsuit",
-    "refund",
     "identity theft",
     "identity stolen",
 ]

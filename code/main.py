@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -48,6 +49,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", type=int, default=None, help="Process only first N rows")
     parser.add_argument("--interactive", action="store_true", help="Run live interactive support triage mode")
     parser.add_argument("--confidence-threshold", type=float, default=0.5, help="Confidence threshold to ask one clarifying question in interactive mode")
+    parser.add_argument("--require-llm", action="store_true", help="Fail fast if heuristic fallback is used due to LLM unavailability")
+    parser.add_argument("--fallback-only", action="store_true", help="Disable LLM calls and run deterministic heuristic fallback for all rows")
     args = parser.parse_args()
 
     if args.sample:
@@ -67,6 +70,9 @@ def _normalize_row(row: pd.Series) -> dict:
 
 
 def _check_corpus_freshness() -> list[str]:
+    if os.getenv("ENABLE_CORPUS_FRESHNESS_CHECK", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        set_stale_domains([])
+        return []
     unreachable: list[str] = []
     for name, url in SOURCE_URLS.items():
         try:
@@ -302,10 +308,11 @@ def main() -> None:
     _ = retrieve("warmup", None, top_k=1)
 
     results = []
+    llm_fallback_rows: list[int] = []
     for idx, row in tqdm(df.iterrows(), total=total, desc="Processing tickets"):
         row_dict = _normalize_row(row)
         try:
-            out = triage_ticket(row_dict, row_id=idx + 1)
+            out = triage_ticket(row_dict, row_id=idx + 1, force_fallback=bool(args.fallback_only))
         except Exception as exc:
             out = {
                 "status": "escalated",
@@ -325,6 +332,8 @@ def main() -> None:
             }
 
         meta = out.get("_meta", {})
+        if bool(meta.get("llm_unavailable", False)):
+            llm_fallback_rows.append(idx + 1)
         log_row = {
             "row_id": meta.get("row_id", idx + 1),
             "company": meta.get("company", str(row_dict.get("company", "unknown")).lower()),
@@ -332,6 +341,7 @@ def main() -> None:
             "confidence": meta.get("confidence_score", 0.0),
             "chunks_used": meta.get("chunks_used", []),
             "escalation_reason": meta.get("escalation_reason", ""),
+            "llm_unavailable": bool(meta.get("llm_unavailable", False)),
         }
         with RUN_LOG_PATH.open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(log_row, ensure_ascii=False) + "\n")
@@ -340,6 +350,13 @@ def main() -> None:
         results.append({k: out.get(k, "") for k in OUTPUT_COLUMNS})
         company = str(row_dict.get("company", "") or "unknown")
         print(f"Row {len(results)}/{total} | {company} | {out.get('status')} | {out.get('request_type')}")
+
+    if args.require_llm and llm_fallback_rows:
+        preview = ",".join(str(x) for x in llm_fallback_rows[:10])
+        raise RuntimeError(
+            f"LLM-required mode failed: fallback used for {len(llm_fallback_rows)} rows "
+            f"(example rows: {preview}). NVIDIA endpoint is unreachable or key is invalid."
+        )
 
     out_df = pd.DataFrame(results, columns=OUTPUT_COLUMNS)
     out_df.to_csv(output_path, index=False)

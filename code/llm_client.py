@@ -2,25 +2,39 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 
-load_dotenv()
+# Load .env from the code/ directory explicitly
+dotenv_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=dotenv_path)
 
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "mistralai/mixtral-8x22b-instruct-v0.1")
 _client: OpenAI | None = None
+_client_api_key: str | None = None
+
+
+def _resolve_api_key() -> str:
+    key = os.getenv("NVIDIA_API_KEY", "").strip()
+    if key.startswith('"') and key.endswith('"') and len(key) >= 2:
+        key = key[1:-1].strip()
+    if key.startswith("'") and key.endswith("'") and len(key) >= 2:
+        key = key[1:-1].strip()
+    return key
 
 
 def _get_client() -> OpenAI:
-    global _client
-    if _client is not None:
-        return _client
-    if not NVIDIA_API_KEY:
+    global _client, _client_api_key
+    api_key = _resolve_api_key()
+    if not api_key:
         raise ValueError("Missing NVIDIA_API_KEY. Set it in code/.env or environment variables.")
-    _client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
+    if _client is not None and _client_api_key == api_key:
+        return _client
+    _client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
+    _client_api_key = api_key
     return _client
 
 
@@ -51,4 +65,5 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.0) -> 
             time.sleep(delay_seconds)
             delay_seconds *= 2
 
-    raise RuntimeError(f"LLM call failed after retries: {last_error}")
+    detail = repr(last_error) if last_error is not None else "unknown_error"
+    raise RuntimeError(f"LLM call failed after retries: {detail}")

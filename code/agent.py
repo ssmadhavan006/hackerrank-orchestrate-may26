@@ -34,6 +34,19 @@ CROSS_DOMAIN_PRODUCT_AREA = "Cross-Domain Routing"
 
 HEDGE_WORDS = ("i'm not sure", "not sure", "may", "might", "possibly", "perhaps")
 CONCRETE_STEP_HINTS = ("go to", "click", "contact", "visit", "follow", "submit", "provide", "check")
+FEATURE_REQUEST_MARKERS = (
+    "feature request",
+    "new feature",
+    "add feature",
+    "can you add",
+    "could you add",
+    "please add",
+    "enhancement",
+    "it would be great if",
+    "would like to request",
+    "request a feature",
+    "support for",
+)
 RUN_LOG_PATH = Path(__file__).resolve().parent / "run_log.jsonl"
 SECURITY_LOG_PATH = Path(__file__).resolve().parent / "security_log.txt"
 DECISION_CACHE_PATH = Path(__file__).resolve().parent / "decision_cache.json"
@@ -334,7 +347,7 @@ def _heuristic_request_type(text: str) -> str:
         return "invalid"
     if any(k in lower for k in ("not working", "down", "error", "failing", "stopped", "bug", "issue in")):
         return "bug"
-    if any(k in lower for k in ("feature request", "new feature", "add feature", "enhancement", "can you add")):
+    if any(k in lower for k in FEATURE_REQUEST_MARKERS):
         return "feature_request"
     return "product_issue"
 
@@ -345,9 +358,10 @@ def _heuristic_fallback_decision(enriched: dict, docs: List[Dict], detected_comp
     top_src = str(docs[0].get("source_file", "local_corpus")) if docs else "local_corpus"
     top_score = float(docs[0].get("retrieval_score", 0.0)) if docs else 0.0
     status = "replied"
-    if enriched.get("is_sensitive_domain") or req_type == "invalid":
+    high_risk = any(k in text.lower() for k in ("fraud", "unauthorized", "identity theft", "account hacked", "account compromised", "lawsuit", "legal"))
+    if high_risk:
         status = "escalated"
-    if top_score < 0.12 and req_type != "invalid":
+    if top_score < 0.08 and req_type not in {"invalid", "feature_request"}:
         status = "escalated"
     # ensure at least occasional feature_request for explicit "request" tickets when LLM unavailable
     if req_type == "product_issue" and "would like to request" in text.lower():
@@ -369,7 +383,7 @@ def _heuristic_fallback_decision(enriched: dict, docs: List[Dict], detected_comp
     }
 
 
-def triage_ticket(row: dict, row_id: int | None = None) -> dict:
+def triage_ticket(row: dict, row_id: int | None = None, force_fallback: bool = False) -> dict:
     enriched = preprocess(row)
     cache_key = f"{str(enriched.get('detected_company','unknown')).lower()}||{str(enriched.get('clean_text','')).strip().lower()}"
     cache = _load_cache()
@@ -528,12 +542,13 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     user_prompt = _build_user_prompt(subject, issue, company_name, docs)
 
     parsed = None
-    llm_unavailable = False
-    try:
-        raw = call_llm(system_prompt, user_prompt, temperature=0.0)
-        parsed = _extract_json(raw)
-    except Exception:
-        llm_unavailable = True
+    llm_unavailable = bool(force_fallback)
+    if not force_fallback:
+        try:
+            raw = call_llm(system_prompt, user_prompt, temperature=0.0)
+            parsed = _extract_json(raw)
+        except Exception:
+            llm_unavailable = True
 
     if parsed is None and not llm_unavailable:
         retry_user_prompt = user_prompt + "\n\nYour previous response was not valid JSON. Respond with ONLY a JSON object."
@@ -563,7 +578,7 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     lower_text = str(enriched.get("clean_text", "")).lower()
     if (
         validated.get("request_type") in {"product_issue", "invalid"}
-        and any(p in lower_text for p in ("would like to request", "feature request", "can you add", "new feature", "enhancement"))
+        and any(p in lower_text for p in FEATURE_REQUEST_MARKERS)
     ):
         validated["request_type"] = "feature_request"
     top_retrieval = float(docs[0].get("retrieval_score", 0.0)) if docs else 0.0
@@ -595,7 +610,7 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
     escalation_reason = _escalation_taxonomy(enriched, validated, docs)
     confidence = _confidence_score(enriched, validated, docs)
 
-    if validated["status"] == "replied" and top_retrieval < 0.12:
+    if validated["status"] == "replied" and top_retrieval < 0.08:
         validated["status"] = "escalated"
         escalation_reason = "corpus_insufficient"
         validated["justification"] = (
@@ -630,6 +645,7 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
             for d in docs
         ],
         "escalation_reason": escalation_reason,
+        "llm_unavailable": llm_unavailable,
         "reasoning_chain": [
             f"detected_company={detected_company}",
             f"product_area_hint={product_area_hint}",
@@ -639,22 +655,22 @@ def triage_ticket(row: dict, row_id: int | None = None) -> dict:
             f"request_type={validated.get('request_type')}",
             f"escalation_rule={escalation_reason or 'none'}",
             f"confidence={confidence:.2f}",
+            f"llm_unavailable={llm_unavailable}",
         ],
     }
     validated["confidence"] = confidence
     validated["domains_involved"] = list(detected_companies) if detected_companies else (
         [detected_company] if detected_company in {"hackerrank", "claude", "visa"} else []
     )
-    if stale_domains:
-        validated["response"] = (
-            str(validated["response"]).strip()
-            + " Note: one or more source support domains were unreachable at startup, so corpus freshness may be reduced."
-        )
+    # Only add freshness warning if confidence is low AND domains are unreachable
+    # This prevents cluttering high-confidence responses with warnings
+    if stale_domains and confidence < 0.5:
         validated["justification"] = (
             str(validated["justification"]).strip()
-            + f" Corpus freshness warning: unreachable domains={','.join(stale_domains)}."
+            + f" (Note: corpus freshness check failed for {','.join(stale_domains)} at startup.)"
         )
-    cache[cache_key] = validated
-    _save_cache(cache)
+    if not llm_unavailable:
+        cache[cache_key] = validated
+        _save_cache(cache)
 
     return validated
